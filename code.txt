@@ -1,0 +1,286 @@
+provider "aws" {
+  region  = "ap-south-1"
+  profile = "NIRBHAY"
+}
+
+
+resource "aws_security_group" "tf_sg" {
+  name        = "tfsg"
+  description = "port 22 and port 80"
+  vpc_id      = "vpc-3be8f553"
+
+  ingress {
+    description = "ssh, port 22"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+    ingress {
+    description = "http, port 80"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ssh_http"
+  }
+}
+
+resource "tls_private_key" "mykey1"{
+  algorithm = "RSA"
+}
+resource "aws_key_pair" "mykey" {
+  key_name   = "terraform_key"
+  public_key =  tls_private_key.mykey1.public_key_openssh
+}
+
+resource "aws_instance" "web1" {
+  ami           = "ami-0732b62d310b80e97"
+  instance_type = "t2.micro"
+  key_name = "terraform_key"
+  security_groups = [aws_security_group.tf_sg.name]
+
+    connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key = tls_private_key.mykey1.private_key_pem
+    host     = aws_instance.web1.public_ip
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install httpd php git -y",
+      "sudo systemctl restart httpd",
+      "sudo systemctl enable httpd",
+    ]
+  }
+  tags = {
+    Name = "terraform_os"
+  }
+}
+
+resource "aws_ebs_volume" "add_vol" {
+  availability_zone = aws_instance.web1.availability_zone
+  size              = 1
+
+  tags = {
+    Name = "terraform_ebs"
+  }
+}
+
+resource "aws_volume_attachment" "ebs_att" {
+  device_name = "/dev/sdh"
+  volume_id   = aws_ebs_volume.add_vol.id
+  instance_id = aws_instance.web1.id
+  force_detach = true
+}
+
+resource "null_resource" "cluster" {
+  depends_on = [
+    aws_volume_attachment.ebs_att,
+  ]
+
+    connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key = tls_private_key.mykey1.private_key_pem
+    host     = aws_instance.web1.public_ip
+  }
+
+    provisioner "remote-exec" {
+    inline = [
+      "sudo mkfs.ext4 /dev/xvdh",
+      "sudo mount /dev/xvdh /var/www/html",
+      "sudo rm -rf /var/www/html/*",
+      "sudo git clone https://github.com/NirbhayMaitra/terraform_code.git /var/www/html "
+    ]
+    }
+}
+
+resource "aws_s3_bucket" "terrabucket" {
+  bucket = "terrabucket2704"
+  acl    = "public-read"
+  force_destroy = true
+    tags = {
+    Name = "terraform_bucket"
+  }
+}
+
+resource "aws_s3_bucket_object" "tf_image" {
+  depends_on = [
+      aws_s3_bucket.terrabucket,
+  ]
+  key        = "myimage"
+  bucket     = "terrabucket2704"
+  content_type = "image/jpg"
+  source     = "C:/Users/NIRBHAY/Desktop/terraform_image/george_everest.jpg"
+  acl = "public-read"
+}
+
+resource "aws_cloudfront_origin_access_identity" "org" {
+  comment = "cloud_front"
+}
+
+locals{
+    s3_origin_id = "aws_s3_bucket.terrabucket.id"
+}
+
+resource "aws_cloudfront_distribution" "tf_cf" {
+  origin {
+    domain_name = aws_s3_bucket.terrabucket.bucket_regional_domain_name
+    origin_id   = local.s3_origin_id
+
+    s3_origin_config {
+      origin_access_identity = "${aws_cloudfront_origin_access_identity.org.cloudfront_access_identity_path}"
+    }
+  }
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "myimage"
+
+  logging_config {
+    include_cookies = false
+    bucket          = aws_s3_bucket.terrabucket.bucket_domain_name
+  }
+
+  default_cache_behavior {
+    allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = local.s3_origin_id
+
+    forwarded_values {
+      query_string = false
+
+      cookies {
+        forward = "none"
+      }
+    }
+
+    viewer_protocol_policy = "allow-all"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+  }
+
+  ordered_cache_behavior {
+    path_pattern     = "/content/immutable/*"
+    allowed_methods  = ["GET", "HEAD", "OPTIONS"]
+    cached_methods   = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id = local.s3_origin_id
+
+    forwarded_values {
+      query_string = false
+      headers = ["ORIGIN"]
+      cookies {
+        forward = "none"
+      }
+    }
+
+    viewer_protocol_policy = "allow-all"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+    compress = true
+  }
+
+  ordered_cache_behavior {
+    path_pattern     = "/content/*"
+    allowed_methods  = ["GET", "HEAD"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = local.s3_origin_id
+
+      forwarded_values {
+      query_string = false
+      headers = ["ORIGIN"]
+      cookies {
+        forward = "none"
+      }
+    }
+
+    viewer_protocol_policy = "allow-all"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+    compress = true
+  }
+
+ price_class= "PriceClass_200"
+ restrictions {
+     geo_restriction {
+         restriction_type = "none"
+     }
+ }
+
+ viewer_certificate{
+     cloudfront_default_certificate = true
+ }
+}
+
+resource "null_resource" "null" {
+  depends_on = [
+    aws_cloudfront_distribution.tf_cf,
+  ]
+
+    connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key = tls_private_key.mykey1.private_key_pem
+    host     = aws_instance.web1.public_ip
+  }
+
+    provisioner "remote-exec" {
+    inline = [
+      "sudo su << EOF",
+      "echo \"<img src='http://${aws_cloudfront_distribution.tf_cf.domain_name}/${aws_s3_bucket_object.tf_image.key}' height='500' width='500'>\" >> /var/www/html/index.php",
+      "EOF",
+      "sudo systemctl restart httpd",
+    ]
+    }
+}
+
+data "aws_iam_policy_document" "s3_policy" {
+  statement {
+    actions = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.terrabucket.arn}/*"]
+
+  principals {
+    type = "AWS"
+    identifiers = [aws_cloudfront_origin_access_identity.org.iam_arn]
+  }
+}
+statement {
+    actions = [
+      "s3:ListBucket",
+    ]
+    resources = [aws_s3_bucket.terrabucket.arn]
+
+    principals {
+    type = "AWS"
+    identifiers = [aws_cloudfront_origin_access_identity.org.iam_arn]
+    }
+}
+}
+
+  resource "aws_s3_bucket_policy" "b_p" {
+  bucket = aws_s3_bucket.terrabucket.id
+  policy = data.aws_iam_policy_document.s3_policy.json
+  }
+
+output "IP_of_OS" {
+    value = aws_instance.web1.public_ip
+}
+
+output "domain_name" {
+    value = aws_cloudfront_distribution.tf_cf.domain_name
+}
