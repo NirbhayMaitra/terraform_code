@@ -70,25 +70,25 @@ resource "aws_instance" "web1" {
   }
 }
 
-resource "aws_ebs_volume" "add_vol" {
-  availability_zone = aws_instance.web1.availability_zone
-  size              = 1
+resource "aws_efs_file_system" "add_vol" {
+  depends_on = [aws_security_group.tf_sg, aws_instance.web1]
+  creation_tken = "task-efs"
 
   tags = {
-    Name = "terraform_ebs"
+    Name = "task-ebs"
   }
 }
 
-resource "aws_volume_attachment" "ebs_att" {
-  device_name = "/dev/sdh"
-  volume_id   = aws_ebs_volume.add_vol.id
-  instance_id = aws_instance.web1.id
-  force_detach = true
+resource "aws_efs_mount_target" "efs_mount" {
+  depends_on = [aws_efs_file_system.add_vol]
+  file_system_id   = aws_efs_file_system.add_vol.id
+  subnet_id = aws_instance.web1.subnet_id
+  security_groups=[aws_security_group.tf_sg.id]
 }
 
 resource "null_resource" "cluster" {
   depends_on = [
-    aws_volume_attachment.ebs_att,
+    aws_efs_file_system.ebs_att,
   ]
 
     connection {
@@ -100,8 +100,8 @@ resource "null_resource" "cluster" {
 
     provisioner "remote-exec" {
     inline = [
-      "sudo mkfs.ext4 /dev/xvdh",
-      "sudo mount /dev/xvdh /var/www/html",
+      "sudo echo ${aws_efs_file_system.add_vol.dns_name}:/var/www/html efs defaults._netdev 0 0>>sudo /etc/fstab",
+      "sudo mount ${aws_efs_file_system.add_vol.dns_name}:/var/www/html/*",
       "sudo rm -rf /var/www/html/*",
       "sudo git clone https://github.com/NirbhayMaitra/terraform_code.git /var/www/html "
     ]
